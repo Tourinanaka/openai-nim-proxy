@@ -21,10 +21,10 @@ if (!NIM_API_KEY) {
 }
 
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = true;
+const SHOW_REASONING = false;
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = true;
+const ENABLE_THINKING_MODE = false;
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
@@ -143,7 +143,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       temperature: temperature || 0.85,
       max_tokens: max_tokens || 4012,
       stream: stream || false,
-      ...(ENABLE_THINKING_MODE && { chat_template_kwargs: { thinking: true } })
+      ...(ENABLE_THINKING_MODE && { chat_template_kwargs: { thinking: false } })
     };
 
     // Make request to NVIDIA NIM API
