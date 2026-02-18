@@ -142,7 +142,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       messages: messages,
       temperature: temperature || 0.85,
       max_tokens: max_tokens || 9024,
-      stream: stream || true,
+      stream: stream || false,
       ...(ENABLE_THINKING_MODE && { chat_template_kwargs: { thinking: true } })
     };
 
@@ -171,7 +171,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       response.data.on('data', (chunk) => {
         buffer += chunk.toString();
-        const lines = buffer.split('\n\n');
+        const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
         lines.forEach(line => {
@@ -231,7 +231,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             res.write(`data: ${JSON.stringify(data)}\n\n`);
           } catch (e) {
             // Forward unparseable lines as-is
-            res.write(line + '\n\n');
+            res.write(line + '\n');
           }
         });
       });
