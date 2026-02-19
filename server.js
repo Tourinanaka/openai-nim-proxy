@@ -21,7 +21,7 @@ if (!NIM_API_KEY) {
 }
 
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = true;
+const SHOW_REASONING = false;
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
 const ENABLE_THINKING_MODE = true;
