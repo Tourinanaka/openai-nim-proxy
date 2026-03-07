@@ -14,11 +14,15 @@ app.use(express.json());
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = true; 
+// 🔥 TOGGLES & FIXES
+const SHOW_REASONING = true;         // Shows/hides reasoning in output with <think> tags
+const ENABLE_THINKING_MODE = true;   // Enables chat_template_kwargs thinking parameter for GLM models
 
-// 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = true; 
+// 🔥 NUCLEAR LINE BREAK FIX 
+// If your chat UI ignores line breaks, this forces them into the stream.
+// Try 'markdown' first (converts \n to \n\n). 
+// If it still doesn't work, change this to 'html' (converts \n to <br>).
+const FORCE_LINE_BREAKS = 'markdown'; 
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
@@ -37,7 +41,8 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     service: 'OpenAI to NVIDIA NIM Proxy', 
     reasoning_display: SHOW_REASONING,
-    thinking_mode: ENABLE_THINKING_MODE
+    thinking_mode: ENABLE_THINKING_MODE,
+    line_break_fix: FORCE_LINE_BREAKS
   });
 });
 
@@ -56,18 +61,6 @@ app.get('/v1/models', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     let { model, messages, temperature, max_tokens, stream } = req.body;
-    
-    // 🔥 FIX 1: INJECT SYSTEM PROMPT TO FIX LINE BREAKS
-    // This solves the 80% missing line breaks issue automatically!
-    const lineBreakInstruction = "Always separate your paragraphs and points using double line breaks (\\n\\n). Never use a single line break.";
-    
-    if (messages && messages.length > 0) {
-      if (messages[0].role === 'system') {
-        messages[0].content += `\n\n${lineBreakInstruction}`;
-      } else {
-        messages.unshift({ role: 'system', content: lineBreakInstruction });
-      }
-    }
 
     // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
@@ -75,13 +68,15 @@ app.post('/v1/chat/completions', async (req, res) => {
       try {
         await axios.post(`${NIM_API_BASE}/chat/completions`, {
           model: model,
-          messages:[{ role: 'user', content: 'test' }],
+          messages: [{ role: 'user', content: 'test' }],
           max_tokens: 1
         }, {
           headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
           validateStatus: (status) => status < 500
-        }).then(res => {
-          if (res.status >= 200 && res.status < 300) nimModel = model;
+        }).then(response => {
+          if (response.status >= 200 && response.status < 300) {
+            nimModel = model;
+          }
         });
       } catch (e) {}
       
@@ -102,12 +97,12 @@ app.post('/v1/chat/completions', async (req, res) => {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.85,
-      max_tokens: max_tokens || 4096, // 🔥 FIX 3: Changed from 109024 to prevent API crashes
+      max_tokens: max_tokens || 4096, // Fixed: lowered from 100k+ to prevent API crashes
       stream: stream || false
     };
 
-    // 🔥 FIX 4: Only apply thinking params to models that actually support it (GLM)
-    if (ENABLE_THINKING_MODE && nimModel.includes('glm')) {
+    // Only apply thinking params to models that actually support it (GLM)
+    if (ENABLE_THINKING_MODE && nimModel.toLowerCase().includes('glm')) {
       nimRequest.chat_template_kwargs = {
         enable_thinking: true,
         clear_thinking: false
@@ -145,14 +140,13 @@ app.post('/v1/chat/completions', async (req, res) => {
             
             try {
               const data = JSON.parse(line.slice(6));
+              
               if (data.choices?.[0]?.delta) {
                 const delta = data.choices[0].delta;
-                
-                // 🔥 FIX 2: Safely handle undefined/empty strings in streaming chunks
-                if (SHOW_REASONING) {
-                  let outputText = "";
+                let outputText = "";
 
-                  // Handle Reasoning
+                if (SHOW_REASONING) {
+                  // 1. Handle Reasoning (Do NOT alter line breaks inside thinking)
                   if (delta.reasoning_content !== undefined && delta.reasoning_content !== null) {
                     if (!reasoningStarted) {
                       outputText += "<think>\n";
@@ -161,27 +155,48 @@ app.post('/v1/chat/completions', async (req, res) => {
                     outputText += delta.reasoning_content;
                   }
 
-                  // Handle Normal Content
+                  // 2. Handle Normal Content (Apply the line break fix here)
                   if (delta.content !== undefined && delta.content !== null) {
                     if (reasoningStarted) {
-                      outputText += "\n</think>\n\n"; // Guarantees a double linebreak after thinking!
+                      outputText += "\n</think>\n\n";
                       reasoningStarted = false;
                     }
-                    outputText += delta.content;
+                    
+                    let safeContent = delta.content;
+                    
+                    // Force line breaks into the main text stream
+                    if (FORCE_LINE_BREAKS === 'html') {
+                      safeContent = safeContent.replace(/\n/g, '<br>');
+                    } else if (FORCE_LINE_BREAKS === 'markdown') {
+                      safeContent = safeContent.replace(/\n/g, '\n\n');
+                    }
+
+                    outputText += safeContent;
                   }
 
-                  // Replace original payload with formatted text
+                  // Update the payload
                   delta.content = outputText;
                   delete delta.reasoning_content;
+
                 } else {
                   // If hiding reasoning, ensure we delete it so it doesn't leak
                   delete delta.reasoning_content;
+                  
+                  // Still apply line break fix to standard content
+                  if (delta.content !== undefined && delta.content !== null) {
+                    let safeContent = delta.content;
+                    if (FORCE_LINE_BREAKS === 'html') {
+                      safeContent = safeContent.replace(/\n/g, '<br>');
+                    } else if (FORCE_LINE_BREAKS === 'markdown') {
+                      safeContent = safeContent.replace(/\n/g, '\n\n');
+                    }
+                    delta.content = safeContent;
+                  }
                 }
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
-              // Ignore incomplete JSON chunks from split
-              res.write(line + '\n\n'); 
+              res.write(line + '\n\n');
             }
           }
         });
@@ -192,8 +207,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         console.error('Stream error:', err);
         res.end();
       });
+
     } else {
-      // Transform NIM response to OpenAI format with reasoning
+      // Handle Non-Streaming requests
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
@@ -202,6 +218,14 @@ app.post('/v1/chat/completions', async (req, res) => {
         choices: response.data.choices.map(choice => {
           let fullContent = choice.message?.content || '';
           
+          // Apply line break fix to main text
+          if (FORCE_LINE_BREAKS === 'html') {
+            fullContent = fullContent.replace(/\n/g, '<br>');
+          } else if (FORCE_LINE_BREAKS === 'markdown') {
+            fullContent = fullContent.replace(/\n/g, '\n\n');
+          }
+
+          // Prepend reasoning block untouched
           if (SHOW_REASONING && choice.message?.reasoning_content) {
             fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
           }
@@ -233,6 +257,20 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
+// Catch-all for unsupported endpoints
+app.all('*', (req, res) => {
+  res.status(404).json({
+    error: {
+      message: `Endpoint ${req.path} not found`,
+      type: 'invalid_request_error',
+      code: 404
+    }
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
+  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Thinking mode params: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Line Break Fix Mode: ${FORCE_LINE_BREAKS}`);
 });
