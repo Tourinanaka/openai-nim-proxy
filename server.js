@@ -18,11 +18,10 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const SHOW_REASONING = true;         // Shows/hides reasoning in output with <think> tags
 const ENABLE_THINKING_MODE = true;   // Enables chat_template_kwargs thinking parameter for GLM models
 
-// 🔥 NUCLEAR LINE BREAK FIX 
-// If your chat UI ignores line breaks, this forces them into the stream.
-// Try 'markdown' first (converts \n to \n\n). 
-// If it still doesn't work, change this to 'html' (converts \n to <br>).
-const FORCE_LINE_BREAKS = 'markdown'; 
+// 🔥 THE ABSOLUTE STRONGEST LINE BREAK FIX 
+// Set to 'html' to forcefully inject literal <br/> tags. 
+// This forces any web browser or React UI to physically push the text down a line.
+const FORCE_LINE_BREAKS = 'html'; 
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
@@ -68,7 +67,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       try {
         await axios.post(`${NIM_API_BASE}/chat/completions`, {
           model: model,
-          messages: [{ role: 'user', content: 'test' }],
+          messages:[{ role: 'user', content: 'test' }],
           max_tokens: 1
         }, {
           headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
@@ -97,11 +96,11 @@ app.post('/v1/chat/completions', async (req, res) => {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.85,
-      max_tokens: max_tokens || 4096, // Fixed: lowered from 100k+ to prevent API crashes
+      max_tokens: max_tokens || 4096, // Protect against NIM API crashes
       stream: stream || false
     };
 
-    // Only apply thinking params to models that actually support it (GLM)
+    // Apply thinking params to GLM models
     if (ENABLE_THINKING_MODE && nimModel.toLowerCase().includes('glm')) {
       nimRequest.chat_template_kwargs = {
         enable_thinking: true,
@@ -155,7 +154,7 @@ app.post('/v1/chat/completions', async (req, res) => {
                     outputText += delta.reasoning_content;
                   }
 
-                  // 2. Handle Normal Content (Apply the line break fix here)
+                  // 2. Handle Normal Content
                   if (delta.content !== undefined && delta.content !== null) {
                     if (reasoningStarted) {
                       outputText += "\n</think>\n\n";
@@ -164,11 +163,11 @@ app.post('/v1/chat/completions', async (req, res) => {
                     
                     let safeContent = delta.content;
                     
-                    // Force line breaks into the main text stream
+                    // 🔥 ABSOLUTE STRONGEST LINE BREAK FIX (Using strict <br/> for React UIs)
                     if (FORCE_LINE_BREAKS === 'html') {
-                      safeContent = safeContent.replace(/\n/g, '<br>');
+                      safeContent = safeContent.replace(/\r?\n/g, '<br/>');
                     } else if (FORCE_LINE_BREAKS === 'markdown') {
-                      safeContent = safeContent.replace(/\n/g, '\n\n');
+                      safeContent = safeContent.replace(/\r?\n/g, '\n\n');
                     }
 
                     outputText += safeContent;
@@ -182,13 +181,13 @@ app.post('/v1/chat/completions', async (req, res) => {
                   // If hiding reasoning, ensure we delete it so it doesn't leak
                   delete delta.reasoning_content;
                   
-                  // Still apply line break fix to standard content
+                  // Apply line break fix to standard content
                   if (delta.content !== undefined && delta.content !== null) {
                     let safeContent = delta.content;
                     if (FORCE_LINE_BREAKS === 'html') {
-                      safeContent = safeContent.replace(/\n/g, '<br>');
+                      safeContent = safeContent.replace(/\r?\n/g, '<br/>');
                     } else if (FORCE_LINE_BREAKS === 'markdown') {
-                      safeContent = safeContent.replace(/\n/g, '\n\n');
+                      safeContent = safeContent.replace(/\r?\n/g, '\n\n');
                     }
                     delta.content = safeContent;
                   }
@@ -218,11 +217,11 @@ app.post('/v1/chat/completions', async (req, res) => {
         choices: response.data.choices.map(choice => {
           let fullContent = choice.message?.content || '';
           
-          // Apply line break fix to main text
+          // 🔥 Apply absolute line break fix to main text
           if (FORCE_LINE_BREAKS === 'html') {
-            fullContent = fullContent.replace(/\n/g, '<br>');
+            fullContent = fullContent.replace(/\r?\n/g, '<br/>');
           } else if (FORCE_LINE_BREAKS === 'markdown') {
-            fullContent = fullContent.replace(/\n/g, '\n\n');
+            fullContent = fullContent.replace(/\r?\n/g, '\n\n');
           }
 
           // Prepend reasoning block untouched
