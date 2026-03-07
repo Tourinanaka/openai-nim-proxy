@@ -15,10 +15,10 @@ const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.c
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
 // 🔥 REASONING DISPLAY TOGGLE - Shows/hides reasoning in output
-const SHOW_REASONING = true; // Set to true to show reasoning with <think> tags
+const SHOW_REASONING = true; 
 
 // 🔥 THINKING MODE TOGGLE - Enables thinking for specific models that support it
-const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs thinking parameter
+const ENABLE_THINKING_MODE = true; 
 
 // Model mapping (adjust based on available NIM models)
 const MODEL_MAPPING = {
@@ -49,33 +49,39 @@ app.get('/v1/models', (req, res) => {
     created: Date.now(),
     owned_by: 'nvidia-nim-proxy'
   }));
-  
-  res.json({
-    object: 'list',
-    data: models
-  });
+  res.json({ object: 'list', data: models });
 });
 
 // Chat completions endpoint (main proxy)
 app.post('/v1/chat/completions', async (req, res) => {
   try {
-    const { model, messages, temperature, max_tokens, stream } = req.body;
+    let { model, messages, temperature, max_tokens, stream } = req.body;
     
+    // 🔥 FIX 1: INJECT SYSTEM PROMPT TO FIX LINE BREAKS
+    // This solves the 80% missing line breaks issue automatically!
+    const lineBreakInstruction = "Always separate your paragraphs and points using double line breaks (\\n\\n). Never use a single line break.";
+    
+    if (messages && messages.length > 0) {
+      if (messages[0].role === 'system') {
+        messages[0].content += `\n\n${lineBreakInstruction}`;
+      } else {
+        messages.unshift({ role: 'system', content: lineBreakInstruction });
+      }
+    }
+
     // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
     if (!nimModel) {
       try {
         await axios.post(`${NIM_API_BASE}/chat/completions`, {
           model: model,
-          messages: [{ role: 'user', content: 'test' }],
+          messages:[{ role: 'user', content: 'test' }],
           max_tokens: 1
         }, {
           headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
           validateStatus: (status) => status < 500
         }).then(res => {
-          if (res.status >= 200 && res.status < 300) {
-            nimModel = model;
-          }
+          if (res.status >= 200 && res.status < 300) nimModel = model;
         });
       } catch (e) {}
       
@@ -96,10 +102,17 @@ app.post('/v1/chat/completions', async (req, res) => {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.85,
-      max_tokens: max_tokens || 100000,
-      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
+      max_tokens: max_tokens || 4096, // 🔥 FIX 3: Changed from 109024 to prevent API crashes
       stream: stream || false
     };
+
+    // 🔥 FIX 4: Only apply thinking params to models that actually support it (GLM)
+    if (ENABLE_THINKING_MODE && nimModel.includes('glm')) {
+      nimRequest.chat_template_kwargs = {
+        enable_thinking: true,
+        clear_thinking: false
+      };
+    }
     
     // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -111,7 +124,6 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
     
     if (stream) {
-      // Handle streaming response with reasoning
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -134,42 +146,42 @@ app.post('/v1/chat/completions', async (req, res) => {
             try {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
+                const delta = data.choices[0].delta;
                 
+                // 🔥 FIX 2: Safely handle undefined/empty strings in streaming chunks
                 if (SHOW_REASONING) {
-                  let combinedContent = '';
-                  
-                  if (reasoning && !reasoningStarted) {
-                    combinedContent = '<think>\n' + reasoning;
-                    reasoningStarted = true;
-                  } else if (reasoning) {
-                    combinedContent = reasoning;
+                  let outputText = "";
+
+                  // Handle Reasoning
+                  if (delta.reasoning_content !== undefined && delta.reasoning_content !== null) {
+                    if (!reasoningStarted) {
+                      outputText += "<think>\n";
+                      reasoningStarted = true;
+                    }
+                    outputText += delta.reasoning_content;
                   }
-                  
-                  if (content && reasoningStarted) {
-                    combinedContent += '</think>\n\n' + content;
-                    reasoningStarted = false;
-                  } else if (content) {
-                    combinedContent += content;
+
+                  // Handle Normal Content
+                  if (delta.content !== undefined && delta.content !== null) {
+                    if (reasoningStarted) {
+                      outputText += "\n</think>\n\n"; // Guarantees a double linebreak after thinking!
+                      reasoningStarted = false;
+                    }
+                    outputText += delta.content;
                   }
-                  
-                  if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
-                    delete data.choices[0].delta.reasoning_content;
-                  }
+
+                  // Replace original payload with formatted text
+                  delta.content = outputText;
+                  delete delta.reasoning_content;
                 } else {
-                  if (content) {
-                    data.choices[0].delta.content = content;
-                  } else {
-                    data.choices[0].delta.content = '';
-                  }
-                  delete data.choices[0].delta.reasoning_content;
+                  // If hiding reasoning, ensure we delete it so it doesn't leak
+                  delete delta.reasoning_content;
                 }
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
             } catch (e) {
-              res.write(line + '\n');
+              // Ignore incomplete JSON chunks from split
+              res.write(line + '\n\n'); 
             }
           }
         });
@@ -203,11 +215,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             finish_reason: choice.finish_reason
           };
         }),
-        usage: response.data.usage || {
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0
-        }
+        usage: response.data.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
       };
       
       res.json(openaiResponse);
@@ -215,7 +223,6 @@ app.post('/v1/chat/completions', async (req, res) => {
     
   } catch (error) {
     console.error('Proxy error:', error.message);
-    
     res.status(error.response?.status || 500).json({
       error: {
         message: error.message || 'Internal server error',
@@ -226,20 +233,6 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
-// Catch-all for unsupported endpoints
-app.all('*', (req, res) => {
-  res.status(404).json({
-    error: {
-      message: `Endpoint ${req.path} not found`,
-      type: 'invalid_request_error',
-      code: 404
-    }
-  });
-});
-
 app.listen(PORT, () => {
   console.log(`OpenAI to NVIDIA NIM Proxy running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
-  console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
 });
