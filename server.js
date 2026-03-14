@@ -26,7 +26,7 @@ const MODEL_MAPPING = {
   'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
   'gpt-4-turbo': 'moonshotai/kimi-k2-instruct-0905',
   'gpt-4o': 'deepseek-ai/deepseek-v3.1',
-  'claude-3-opus': 'openai/gpt-oss-120b',
+  'claude-3-opus': 'z-ai/glm4.7',
   'claude-3-sonnet': 'z-ai/glm5',
   'gemini-pro': 'qwen/qwen3-next-80b-a3b-thinking' 
 };
@@ -49,7 +49,7 @@ app.get('/v1/models', (req, res) => {
     created: Date.now(),
     owned_by: 'nvidia-nim-proxy'
   }));
-  
+
   res.json({
     object: 'list',
     data: models
@@ -60,7 +60,7 @@ app.get('/v1/models', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
   try {
     const { model, messages, temperature, max_tokens, stream } = req.body;
-    
+
     // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
     if (!nimModel) {
@@ -78,7 +78,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           }
         });
       } catch (e) {}
-      
+
       if (!nimModel) {
         const modelLower = model.toLowerCase();
         if (modelLower.includes('gpt-4') || modelLower.includes('claude-opus') || modelLower.includes('405b')) {
@@ -90,17 +90,17 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
       }
     }
-    
+
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
       messages: messages,
       temperature: temperature || 0.85,
-      max_tokens: max_tokens || 9024,
-      chat_template_kwargs: { thinking: true, enable_thinking: true, clear_thinking: false } } : undefined,
-      stream: stream || true
+      max_tokens: max_tokens || 5000,
+      extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
+      stream: stream || false
     };
-    
+
     // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
@@ -109,51 +109,51 @@ app.post('/v1/chat/completions', async (req, res) => {
       },
       responseType: stream ? 'stream' : 'json'
     });
-    
+
     if (stream) {
       // Handle streaming response with reasoning
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      
+
       let buffer = '';
       let reasoningStarted = false;
-      
+
       response.data.on('data', (chunk) => {
         buffer += chunk.toString();
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
-        
+
         lines.forEach(line => {
           if (line.startsWith('data: ')) {
             if (line.includes('[DONE]')) {
               res.write(line + '\n');
               return;
             }
-            
+
             try {
               const data = JSON.parse(line.slice(6));
               if (data.choices?.[0]?.delta) {
                 const reasoning = data.choices[0].delta.reasoning_content;
                 const content = data.choices[0].delta.content;
-                
+
                 if (SHOW_REASONING) {
                   let combinedContent = '';
-                  
+
                   if (reasoning && !reasoningStarted) {
                     combinedContent = '<think>\n' + reasoning;
                     reasoningStarted = true;
                   } else if (reasoning) {
                     combinedContent = reasoning;
                   }
-                  
+
                   if (content && reasoningStarted) {
                     combinedContent += '</think>\n\n' + content;
                     reasoningStarted = false;
                   } else if (content) {
                     combinedContent += content;
                   }
-                  
+
                   if (combinedContent) {
                     data.choices[0].delta.content = combinedContent;
                     delete data.choices[0].delta.reasoning_content;
@@ -174,7 +174,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           }
         });
       });
-      
+
       response.data.on('end', () => res.end());
       response.data.on('error', (err) => {
         console.error('Stream error:', err);
@@ -189,11 +189,11 @@ app.post('/v1/chat/completions', async (req, res) => {
         model: model,
         choices: response.data.choices.map(choice => {
           let fullContent = choice.message?.content || '';
-          
+
           if (SHOW_REASONING && choice.message?.reasoning_content) {
             fullContent = '<think>\n' + choice.message.reasoning_content + '\n</think>\n\n' + fullContent;
           }
-          
+
           return {
             index: choice.index,
             message: {
@@ -209,13 +209,13 @@ app.post('/v1/chat/completions', async (req, res) => {
           total_tokens: 0
         }
       };
-      
+
       res.json(openaiResponse);
     }
-    
+
   } catch (error) {
     console.error('Proxy error:', error.message);
-    
+
     res.status(error.response?.status || 500).json({
       error: {
         message: error.message || 'Internal server error',
