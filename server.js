@@ -20,40 +20,57 @@ function prepareMessages(messages) {
   });
 }
 
-// ── Force linebreaks into model output ──────────────────
+// ── Line break engine (ported from streaming version) ───
+function needsBreak(a, sep, c) {
+  if (sep === ' ') {
+    if (/[.!?]/.test(a) && c === '"') return true;
+    if (/[.!?"'*]/.test(a) && c === '*') return true;
+    if (a === '*' && /[A-Z"]/.test(c)) return true;
+    if (/["']/.test(a) && /[A-Z]/.test(c)) return true;
+  }
+  if (sep === '\n') {
+    if (a !== '\n' && (c === '"' || c === '*')) return true;
+    if (/["']/.test(a) && /[A-Z*]/.test(c)) return true;
+  }
+  return false;
+}
+
 function enforceLineBreaks(text) {
   text = text.replace(/\r\n/g, '\n');
+  if (text.length < 3) return text;
 
-  // CASE 1: Complete wall of text — no double newlines at all
-  if (text.length > 200 && !text.includes('\n\n')) {
-    text = text.replace(/([.!?])\s+(")/g, '$1\n\n$2');
-    text = text.replace(/([.!?""''"])\s+(\*)/g, '$1\n\n$2');
-    text = text.replace(/(\*)\s+([A-Z"""])/g, '$1\n\n$2');
-    text = text.replace(/(["""'])\s+([A-Z])/g, '$1\n\n$2');
+  // 3-char sliding window — same logic as streaming version
+  let raw = '';
+  let i = 0;
+  while (i < text.length - 2) {
+    if (needsBreak(text[i], text[i + 1], text[i + 2])) {
+      raw += text[i] + '\n\n';
+      i += 2;   // skip the separator, next loop starts at char c
+    } else {
+      raw += text[i];
+      i++;
+    }
+  }
+  // append remaining 1–2 chars that couldn't form a full window
+  while (i < text.length) {
+    raw += text[i];
+    i++;
+  }
 
-    if (text.length > 400 && !text.includes('\n\n')) {
-      let count = 0;
-      text = text.replace(/([.!?])\s+([A-Z])/g, (match, p1, p2) => {
-        count++;
-        return count % 3 === 0 ? p1 + '\n\n' + p2 : match;
-      });
+  // collapse 3+ newlines → 2
+  let out = '';
+  let nlRun = 0;
+  for (const ch of raw) {
+    if (ch === '\n') {
+      nlRun++;
+      if (nlRun <= 2) out += '\n';
+    } else {
+      nlRun = 0;
+      out += ch;
     }
   }
 
-  // CASE 2: Has single newlines that should be doubles
-  text = text.replace(/([^\n])\n(")/g, '$1\n\n$2');
-  text = text.replace(/([^\n])\n(\*)/g, '$1\n\n$2');
-  text = text.replace(/(["""'])\n([A-Z*])/g, '$1\n\n$2');
-
-  // Scene breaks and stage directions
-  text = text.replace(/([.!?""'*])\s+([-—]{2,})/g, '$1\n\n$2');
-  text = text.replace(/([.!?""'*])\s+(\[)/g, '$1\n\n$2');
-  text = text.replace(/(\])\s+([A-Z"*])/g, '$1\n\n$2');
-
-  // Collapse 3+ newlines down to 2
-  text = text.replace(/\n{3,}/g, '\n\n');
-
-  return text;
+  return out;
 }
 
 // ── Routes ──────────────────────────────────────────────
@@ -86,7 +103,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       model: 'z-ai/glm5',
       messages: preparedMessages,
       temperature: temperature || 0.85,
-      max_tokens: max_tokens || 5000,
+      max_tokens: max_tokens || 9024,
       stream: false,
       chat_template_kwargs: {
         enable_thinking: true,
